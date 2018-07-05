@@ -71,6 +71,17 @@ static uv_os_sock_t create_tcp_socket(void) {
 }
 
 
+static void close_socket(uv_os_sock_t sock) {
+  int r;
+#ifdef _WIN32
+  r = closesocket(sock);
+#else
+  r = close(sock);
+#endif
+  ASSERT(r == 0);
+}
+
+
 static void alloc_cb(uv_handle_t* handle,
                      size_t suggested_size,
                      uv_buf_t* buf) {
@@ -170,10 +181,108 @@ TEST_IMPL(tcp_open) {
                      connect_cb);
   ASSERT(r == 0);
 
+#ifndef _WIN32
+  {
+    uv_tcp_t client2;
+
+    r = uv_tcp_init(uv_default_loop(), &client2);
+    ASSERT(r == 0);
+
+    r = uv_tcp_open(&client2, sock);
+    ASSERT(r == UV_EEXIST);
+
+    uv_close((uv_handle_t*) &client2, NULL);
+  }
+#endif  /* !_WIN32 */
+
   uv_run(uv_default_loop(), UV_RUN_DEFAULT);
 
   ASSERT(shutdown_cb_called == 1);
   ASSERT(connect_cb_called == 1);
+  ASSERT(write_cb_called == 1);
+  ASSERT(close_cb_called == 1);
+
+  MAKE_VALGRIND_HAPPY();
+  return 0;
+}
+
+
+TEST_IMPL(tcp_open_twice) {
+  uv_tcp_t client;
+  uv_os_sock_t sock1, sock2;
+  int r;
+
+  startup();
+  sock1 = create_tcp_socket();
+  sock2 = create_tcp_socket();
+
+  r = uv_tcp_init(uv_default_loop(), &client);
+  ASSERT(r == 0);
+
+  r = uv_tcp_open(&client, sock1);
+  ASSERT(r == 0);
+
+  r = uv_tcp_open(&client, sock2);
+  ASSERT(r == UV_EBUSY);
+  close_socket(sock2);
+
+  uv_close((uv_handle_t*) &client, NULL);
+  uv_run(uv_default_loop(), UV_RUN_DEFAULT);
+
+  MAKE_VALGRIND_HAPPY();
+  return 0;
+}
+
+
+TEST_IMPL(tcp_open_bound) {
+  struct sockaddr_in addr;
+  uv_tcp_t server;
+  uv_os_sock_t sock;
+
+  startup();
+  sock = create_tcp_socket();
+
+  ASSERT(0 == uv_ip4_addr("127.0.0.1", TEST_PORT, &addr));
+
+  ASSERT(0 == uv_tcp_init(uv_default_loop(), &server));
+
+  ASSERT(0 == bind(sock, (struct sockaddr*) &addr, sizeof(addr)));
+
+  ASSERT(0 == uv_tcp_open(&server, sock));
+
+  ASSERT(0 == uv_listen((uv_stream_t*) &server, 128, NULL));
+
+  MAKE_VALGRIND_HAPPY();
+  return 0;
+}
+
+
+TEST_IMPL(tcp_open_connected) {
+  struct sockaddr_in addr;
+  uv_tcp_t client;
+  uv_os_sock_t sock;
+  uv_buf_t buf = uv_buf_init("PING", 4);
+
+  ASSERT(0 == uv_ip4_addr("127.0.0.1", TEST_PORT, &addr));
+
+  startup();
+  sock = create_tcp_socket();
+
+  ASSERT(0 == connect(sock, (struct sockaddr*) &addr,  sizeof(addr)));
+
+  ASSERT(0 == uv_tcp_init(uv_default_loop(), &client));
+
+  ASSERT(0 == uv_tcp_open(&client, sock));
+
+  ASSERT(0 == uv_write(&write_req, (uv_stream_t*) &client, &buf, 1, write_cb));
+
+  ASSERT(0 == uv_shutdown(&shutdown_req, (uv_stream_t*) &client, shutdown_cb));
+
+  ASSERT(0 == uv_read_start((uv_stream_t*) &client, alloc_cb, read_cb));
+
+  uv_run(uv_default_loop(), UV_RUN_DEFAULT);
+
+  ASSERT(shutdown_cb_called == 1);
   ASSERT(write_cb_called == 1);
   ASSERT(close_cb_called == 1);
 
